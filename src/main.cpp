@@ -1,119 +1,117 @@
 #include <Arduino.h>
 #include <SimpleFOC.h>
+#include <encoders/smoothing/SmoothingSensor.h>
 
 // BLDCMotor motor = BLDCMotor(pole pair number);
-BLDCMotor motor = BLDCMotor(7);
+BLDCMotor motor = BLDCMotor(4, 0.5393);
 BLDCDriver6PWM driver = BLDCDriver6PWM(A_PHASE_UH, A_PHASE_UL, A_PHASE_VH, A_PHASE_VL, A_PHASE_WH, A_PHASE_WL);
-MagneticSensorPWM sensor(PB6, 2, 904);
-// https://docs.simplefoc.com/low_side_current_sense
-// LowsideCurrentSense constructor
-//  - shunt_resistor  - shunt resistor value
-//  - gain  - current-sense op-amp gain
-//  - phA   - A phase adc pin
-//  - phB   - B phase adc pin
-//  - phC   - C phase adc pin (optional)
-//LowsideCurrentSense currentSense = LowsideCurrentSense(0.003f, -64.0f / 7.0f, A_OP1_OUT, A_OP2_OUT, A_OP3_OUT);
+
+HallSensor sensor = HallSensor(A_HALL1, A_HALL2, A_HALL3, 4);
+void doA(){sensor.handleA();}
+void doB(){sensor.handleB();}
+void doC(){sensor.handleC();}
+// instantiate the smoothing sensor, providing the real sensor as a constructor argument
+SmoothingSensor smooth = SmoothingSensor(sensor, motor);
 
 // instantiate the commander
-float target_voltage = 0;
-float target_velocity = 0;
+float target_voltage = 5;
 
 Commander command = Commander(Serial);
 
-//void onPID(char* cmd){command.pid(&motor.PID_velocity, cmd);}
 void doTarget(char *cmd){ command.scalar(&target_voltage, cmd);}
-
-void doPWM()
-{
-  sensor.handlePWM();
-}
 
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
+  delay(1000);
 
-  //command.add('T', doTarget, "target velocity");
+  pinMode(A_OP3_OUT, OUTPUT);
+  pinMode(A_CAN_SHDN, OUTPUT);
+
+  #if 0
+  // check if you need internal pullups
+  sensor.pullup = Pullup::USE_EXTERN;
+  
+  // initialise encoder hardware
+  sensor.init();
+  // hardware interrupt enable
+  sensor.enableInterrupts(doA, doB, doC);
+  smooth.phase_correction = -_PI_6;
+  // link the motor to the sensor
+  motor.linkSensor(&smooth);
+  #else
    // initialise magnetic sensor hardware
   sensor.init();
-  // comment out to use sensor in blocking (non-interrupt) way
-  sensor.enableInterrupt(doPWM);
+  sensor.enableInterrupts(doA, doB, doC);
+  // set SmoothingSensor phase correction for hall sensors
+  //smooth.phase_correction = -_PI_6;
   // link the motor to the sensor
-  motor.linkSensor(&sensor);
+  motor.linkSensor(&smooth);//smooth
 
-  // driver config
-  // power supply voltage [V]
-  driver.voltage_power_supply = 10;
-  // limit the maximal dc voltage the driver can set
-  // as a protection measure for the low-resistance motors
-  // this value is fixed on startup
-  //driver.voltage_limit = 10;
-  driver.init();
-  // link the motor and the driver
+  driver.voltage_power_supply = 12;
+  driver.pwm_frequency = 16000;
+  driver.dead_zone = 0.03;
+
+  //driver.voltage_limit = 8;
+  if ( driver.init() )
+  {
+    driver.enable();
+  } else
+  {
+    return;
+  }
+
   motor.linkDriver(&driver);
 
-  // motor.PID_velocity.P = 0.05;
-  // motor.PID_velocity.I = 0.005;
-  // motor.PID_velocity.D = 0;
+  // motor.current_limit = 0.1f; // 1.0 [Amps]
+  // Orange-Red:   0.5412R
+  // Brown-Red:    0.5399R
+  // Brown-Orange: 0.5368R
+  //motor.phase_resistance = 0.5393; // Average 0.5393 [Ohm]
 
-  // motor.PID_velocity.output_ramp = 1000;
-
-  // motor.LPF_velocity.Tf = 0.1;
-
-  // limiting motor movements
-  // limit the voltage to be set to the motor
-  // start very low for high resistance motors
-  // current = voltage / resistance, so try to be well under 1Amp
-  //motor.voltage_limit = 4.5;   // [V]
-
-  // Limits
-  //motor.current_limit = 0.8f; // 1.0 [Amps]
-
-  // general settings
-  // motor phase resistance // I_max = V_dc/R
-  motor.phase_resistance = 5.57; // 5,57 [Ohm]
-
-  // motor KV rating [rpm/V]
-  //motor.KV_rating = 197; // [rpm/volt] - default not set
+  //motor.voltage_limit = 1; //[V]
+  //motor.velocity_limit = 20; //[rad/s]
 
   // aligning voltage 
-  //motor.voltage_sensor_align = 5;
+  motor.voltage_sensor_align = 1;
   motor.torque_controller = TorqueControlType::voltage;
-  // choose FOC modulation (optional)
-  motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
-   // set motion control loop to be used
+  motor.foc_modulation = FOCModulationType::SpaceVectorPWM; // Trapezoid_120 ; SpaceVectorPWM ; Trapezoid_150
   motor.controller = MotionControlType::torque;
-  
-
+  //motor.voltage_limit = 8;
   motor.useMonitoring(Serial);
 
   // init motor hardware
   motor.init();
-
   // align sensor and start FOC
   motor.initFOC();
   
   //command.add('C', onPID, "my pid");
   command.add('T', doTarget, "target voltage");
+  #endif
 
   Serial.println("Motor ready!");
   Serial.println(F("Set the target voltage using serial terminal:"));
   _delay(1000);
-  //TIM_TypeDef *Instance = TIM1;
-  //HardwareTimer *Timer = new HardwareTimer(Instance);
-
 }
 
 void loop()
 {
-  // put your main code here, to run repeatedly:
-  //sensor.update();
-
-  // open loop velocity movement
-  // using motor.voltage_limit and motor.velocity_limit
+  #if 0
+  smooth.update();
+  // display the angle and the angular velocity to the terminal
+  Serial.print(smooth.getAngle());
+  Serial.print("\t");
+  Serial.println(smooth.getVelocity());
+  delay(100);
+  #else
+  digitalWrite(A_OP3_OUT, HIGH);
   motor.loopFOC();
+  digitalWrite(A_OP3_OUT, LOW);
 
+  digitalWrite(A_CAN_SHDN, HIGH);
   motor.move(target_voltage);
+  digitalWrite(A_CAN_SHDN, LOW);
 
-  // user communication
   command.run();
+  #endif
 }
